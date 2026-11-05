@@ -84,7 +84,7 @@ public class MainActivity extends Activity {
         setContentView(root);
         toolbar.setVisibility(View.GONE);
         bottom.setVisibility(View.GONE);
-        render();
+        showLibrary();
     }
     private void toggleControls() {
         controlsVisible = !controlsVisible;
