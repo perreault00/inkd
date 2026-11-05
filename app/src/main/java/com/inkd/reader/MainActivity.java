@@ -61,7 +61,24 @@ public class MainActivity extends Activity {
     private void pick() { Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("application/epub+zip"); i.putExtra(Intent.EXTRA_MIME_TYPES,new String[]{"application/epub+zip","application/octet-stream"}); startActivityForResult(i,PICK_EPUB); }
     @Override protected void onActivityResult(int request,int result,Intent data) { super.onActivityResult(request,result,data); if(request==PICK_EPUB&&result==RESULT_OK&&data!=null) { try { load(data.getData()); } catch(Exception e) { Toast.makeText(this,"EPUB non pris en charge : "+e.getMessage(),Toast.LENGTH_LONG).show(); } } }
     private static byte[] read(InputStream in) throws IOException { ByteArrayOutputStream out=new ByteArrayOutputStream(); byte[] b=new byte[8192]; int n; while((n=in.read(b))!=-1) { out.write(b,0,n); if(out.size()>50_000_000) throw new IOException("Livre trop volumineux"); } return out.toByteArray(); }
-    private static Document parse(byte[] bytes) throws Exception { DocumentBuilderFactory f=DocumentBuilderFactory.newInstance(); f.setNamespaceAware(true); f.setFeature("http://apache.org/xml/features/disallow-doctype-decl",true); f.setFeature("http://xml.org/sax/features/external-general-entities",false); f.setFeature("http://xml.org/sax/features/external-parameter-entities",false); return f.newDocumentBuilder().parse(new ByteArrayInputStream(bytes)); }
+
+    private static Document parse(byte[] bytes) throws Exception {
+        String xml = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        if (xml.matches("(?is).*<!ENTITY\\s+.*"))
+            throw new IOException("Entités XML non autorisées");
+        DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
+        f.setNamespaceAware(true);
+        f.setExpandEntityReferences(false);
+        try {
+            f.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            f.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+        } catch (javax.xml.parsers.ParserConfigurationException ignored) {}
+        javax.xml.parsers.DocumentBuilder b = f.newDocumentBuilder();
+        b.setEntityResolver((publicId, systemId) ->
+            new org.xml.sax.InputSource(new java.io.StringReader("")));
+        return b.parse(new ByteArrayInputStream(bytes));
+    }
     private static Element first(Document d,String tag) { return (Element)d.getElementsByTagNameNS("*",tag).item(0); }
     private static String normalized(String base,String rel) { try { return new java.net.URI(null,null,"/"+base,null).resolve(rel).normalize().getPath().substring(1); } catch(Exception e) {return rel;} }
     private void load(Uri uri) throws Exception {
