@@ -1,32 +1,4 @@
-python3 - <<'PY'
-from pathlib import Path
-
-p = Path("app/src/main/java/com/inkd/reader/MainActivity.java")
-s = p.read_text()
-
-import re
-
-# Supprimer uniquement les appels incompatibles.
-s = re.sub(
-    r'^\s*f\.setFeature\("http://xml\.org/sax/features/external-(?:general|parameter)-entities", false\);\s*$',
-        '\n',
-            s,
-                flags=re.MULTILINE
-                )
-                
-                s = re.sub(
-                    r'^\s*f\.setFeature\("http://apache\.org/xml/features/nonvalidating/load-external-dtd", false\);\s*$',
-                        '\n',
-                            s,
-                                flags=re.MULTILINE
-                                )
-                                
-                                p.write_text(s)
-                                PY
-                                git add app/src/main/java/com/inkd/reader/MainActivity.java
-                                git commit -m "Fix XML compatibility on Android"
-                                git push
-                                package com.inkd.reader;
+package com.inkd.reader;
 
 import android.app.Activity;
 import android.os.Bundle;
@@ -111,9 +83,6 @@ public class MainActivity extends Activity {
         DocumentBuilderFactory f=DocumentBuilderFactory.newInstance();
         f.setNamespaceAware(true);
         f.setExpandEntityReferences(false);
-        f.setFeature("http://xml.org/sax/features/external-general-entities",false);
-        f.setFeature("http://xml.org/sax/features/external-parameter-entities",false);
-        try {f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd",false);} catch(Exception ignored) {}
         javax.xml.parsers.DocumentBuilder b=f.newDocumentBuilder();
         b.setEntityResolver((publicId,systemId)->new org.xml.sax.InputSource(new java.io.StringReader("")));
         return b.parse(new ByteArrayInputStream(bytes));
