@@ -11,6 +11,10 @@ import android.view.View;
 import android.graphics.Color;
 import android.view.Gravity;
 import android.widget.*;
+import android.content.SharedPreferences;
+import android.app.AlertDialog;
+import android.graphics.Typeface;
+import org.json.*;
 import org.w3c.dom.*;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.*;
@@ -28,19 +32,27 @@ public class MainActivity extends Activity {
     private String lastBook = "";
     private LinearLayout toolbar, bottom;
     private boolean controlsVisible = false;
-    private int page = 0;
+    private int page = 0, totalPages = 1;
+    private String bookId = "";
+    private String author = "";
+    private final ArrayList<String> chapterNames = new ArrayList<>();
+    private LinearLayout root, library;
+    private TextView libraryHeading;
+    private boolean inLibrary = true;
+    private static final String PREFS = "inkd_library_v4";
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().getDecorView().setSystemUiVisibility(5894 | 1024 | 512);
-        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
+        root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(0xfff5f0e5);
         toolbar = new LinearLayout(this); toolbar.setGravity(17);
-        Button open = button("EPUB", () -> pick());
+        Button open = button("☰", () -> showLibrary());
+        Button toc = button("Chapitres", () -> showContents());
         Button smaller = button("A−", () -> {fontSize=Math.max(12,fontSize-2); render();});
         Button bigger = button("A+", () -> {fontSize=Math.min(34,fontSize+2); render();});
         Button colors = button("☼", () -> {theme=(theme+1)%3; render();});
-        toolbar.addView(open); toolbar.addView(smaller); toolbar.addView(bigger); toolbar.addView(colors);
+        toolbar.addView(open); toolbar.addView(toc); toolbar.addView(smaller); toolbar.addView(bigger); toolbar.addView(colors);
         root.addView(toolbar);
         frame = new FrameLayout(this);
         web = new WebView(this); web.setBackgroundColor(0xfff5f0e5);
@@ -52,8 +64,9 @@ public class MainActivity extends Activity {
             @JavascriptInterface public void chapter(int dir) { runOnUiThread(() -> changeChapter(dir)); }
             @JavascriptInterface public void menu() { runOnUiThread(() -> toggleControls()); }
             @JavascriptInterface public void progress(int current, int total) { runOnUiThread(() -> {
-                page = current;
-                status.setText(chapters.isEmpty()?"Bibliothèque": "Chapitre " +(chapter+1)+"/"+chapters.size()+"  ·  Page "+(current+1)+"/"+total);
+                page = current; totalPages = Math.max(1,total);
+                savePosition();
+                status.setText(chapters.isEmpty()?"Bibliothèque": "Chapitre " +(chapter+1)+"/"+chapters.size()+"  ·  Page "+(current+1)+"/"+total+"  ·  "+progressPercent()+"%");
             }); }
         }, "InkBridge");
         web.setWebViewClient(new WebViewClient());
@@ -65,6 +78,9 @@ public class MainActivity extends Activity {
         bottom.addView(status,new LinearLayout.LayoutParams(0,55,1));
         bottom.addView(button("▶", () -> move(1)));
         root.addView(bottom);
+        library = new LinearLayout(this); library.setOrientation(LinearLayout.VERTICAL);
+        library.setPadding(24,24,24,24); library.setBackgroundColor(0xfff5f0e5);
+        root.addView(library,new LinearLayout.LayoutParams(-1,-1));
         setContentView(root);
         toolbar.setVisibility(View.GONE);
         bottom.setVisibility(View.GONE);
@@ -77,12 +93,16 @@ public class MainActivity extends Activity {
     }
     private Button button(String text, Runnable click) { Button b=new Button(this); b.setText(text); b.setAllCaps(false); b.setOnClickListener(v->click.run()); return b; }
     private void pick() { Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("application/epub+zip"); i.putExtra(Intent.EXTRA_MIME_TYPES,new String[]{"application/epub+zip","application/octet-stream"}); startActivityForResult(i,PICK_EPUB); }
-    @Override protected void onActivityResult(int request,int result,Intent data) { super.onActivityResult(request,result,data); if(request==PICK_EPUB&&result==RESULT_OK&&data!=null) { try { load(data.getData()); } catch(Exception e) { Toast.makeText(this,"EPUB non pris en charge : "+e.getMessage(),Toast.LENGTH_LONG).show(); } } }
+    @Override protected void onActivityResult(int request,int result,Intent data) { super.onActivityResult(request,result,data); if(request==PICK_EPUB&&result==RESULT_OK&&data!=null) { try { importBook(data.getData()); } catch(Exception e) { Toast.makeText(this,"EPUB non pris en charge : "+e.getMessage(),Toast.LENGTH_LONG).show(); } } }
     private static byte[] read(InputStream in) throws IOException { ByteArrayOutputStream out=new ByteArrayOutputStream(); byte[] b=new byte[8192]; int n; while((n=in.read(b))!=-1) { out.write(b,0,n); if(out.size()>50_000_000) throw new IOException("Livre trop volumineux"); } return out.toByteArray(); }
     private static Document parse(byte[] bytes) throws Exception {
         DocumentBuilderFactory f=DocumentBuilderFactory.newInstance();
         f.setNamespaceAware(true);
         f.setExpandEntityReferences(false);
+        try { f.setFeature("http://xml.org/sax/features/external-general-entities",false); } catch(Exception ignored) {}
+        try { f.setFeature("http://xml.org/sax/features/external-parameter-entities",false); } catch(Exception ignored) {}
+        try {f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd",false);} catch(Exception ignored) {}
+        try { f.setFeature("http://apache.org/xml/features/disallow-doctype-decl",true); } catch(Exception ignored) {}
         javax.xml.parsers.DocumentBuilder b=f.newDocumentBuilder();
         b.setEntityResolver((publicId,systemId)->new org.xml.sax.InputSource(new java.io.StringReader("")));
         return b.parse(new ByteArrayInputStream(bytes));
@@ -97,14 +117,25 @@ public class MainActivity extends Activity {
         String opf=rootfile.getAttribute("full-path"); Document packageDoc=parse(files.get(opf));
         String base=opf.contains("/")?opf.substring(0,opf.lastIndexOf('/')+1):"";
         Element t=first(packageDoc,"title"); title=t==null?"Mon livre":t.getTextContent();
+        Element a=first(packageDoc,"creator"); author=a==null?"Auteur inconnu":a.getTextContent();
         HashMap<String,String> manifest=new HashMap<>(); NodeList items=packageDoc.getElementsByTagNameNS("*","item");
         for(int j=0;j<items.getLength();j++) {Element el=(Element)items.item(j); manifest.put(el.getAttribute("id"),normalized(base,el.getAttribute("href")));}
-        ArrayList<String> parsed=new ArrayList<>(); NodeList refs=packageDoc.getElementsByTagNameNS("*","itemref");
+        ArrayList<String> parsed=new ArrayList<>(); ArrayList<String> names=new ArrayList<>(); NodeList refs=packageDoc.getElementsByTagNameNS("*","itemref");
         for(int j=0;j<refs.getLength();j++) {Element ref=(Element)refs.item(j); String path=manifest.get(ref.getAttribute("idref")); byte[] bytes=files.get(path); if(bytes==null)continue;
-            try {Document doc=parse(bytes); Element body=first(doc,"body"); if(body!=null) {StringBuilder sb=new StringBuilder(); NodeList children=body.getChildNodes(); for(int k=0;k<children.getLength();k++) appendNode(children.item(k),sb); if(sb.length()>0)parsed.add(sb.toString());}} catch(Exception ignored){} }
+            try {Document doc=parse(bytes); Element body=first(doc,"body"); if(body!=null) {StringBuilder sb=new StringBuilder(); NodeList children=body.getChildNodes(); for(int k=0;k<children.getLength();k++) appendNode(children.item(k),sb); if(sb.length()>0) { parsed.add(sb.toString()); Element heading=null;
+                for(String h:new String[]{"h1","h2","h3","title"}) { heading=first(doc,h); if(heading!=null) break; }
+                String name=heading==null?"Chapitre "+(parsed.size()):heading.getTextContent().trim();
+                names.add(name.length()==0?"Chapitre "+parsed.size():name); }}} catch(Exception ignored){} }
         if(parsed.isEmpty()) throw new IOException("Aucun chapitre XHTML lisible");
-        chapters.clear(); chapters.addAll(parsed); chapter=0; lastBook=uri.toString();
-        chapter=getPreferences(0).getInt("position_"+lastBook,0); chapter=Math.min(chapter,chapters.size()-1); page=0; render();
+        chapters.clear(); chapters.addAll(parsed); chapterNames.clear(); chapterNames.addAll(names);
+        chapter=0; lastBook=uri.toString();
+        SharedPreferences pref=getSharedPreferences(PREFS,0);
+        chapter=Math.max(0,Math.min(pref.getInt("chapter_"+bookId,0),chapters.size()-1));
+        page=Math.max(0,pref.getInt("page_"+bookId,0));
+        inLibrary=false; library.setVisibility(View.GONE); frame.setVisibility(View.VISIBLE);
+        toolbar.setVisibility(controlsVisible?View.VISIBLE:View.GONE);
+        bottom.setVisibility(controlsVisible?View.VISIBLE:View.GONE);
+        render();
     }
     private static String escape(String s) {return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\"","&quot;");}
     private static void appendNode(Node node,StringBuilder sb) {if(node.getNodeType()==Node.TEXT_NODE) {sb.append(escape(node.getNodeValue()));return;} if(node.getNodeType()!=Node.ELEMENT_NODE)return;
@@ -122,14 +153,14 @@ public class MainActivity extends Activity {
         int next=chapter+dir;
         if(next<0||next>=chapters.size())return;
         chapter=next; page=0;
-        getPreferences(0).edit().putInt("position_"+lastBook,chapter).apply();
+        savePosition();
         render();
     }
     private void render() {
         String bg=theme==0?"#f5f0e5":theme==1?"#ffffff":"#000000";
         String fg=theme==2?"#c9c9c9":"#252525";
         String body=chapters.isEmpty()?"<h1>INKD</h1><p>Ta liseuse Android, avec un effet E-Ink.</p><p>Appuie sur <b>EPUB</b> pour ouvrir un livre.</p>":chapters.get(chapter);
-        status.setText(chapters.isEmpty()?"Bibliothèque":(chapter+1)+" / "+chapters.size()); status.setTextColor(theme==2?0xffcccccc:0xff333333);
+        status.setText(chapters.isEmpty()?"Bibliothèque":(chapter+1)+" / "+chapters.size()+" · "+progressPercent()+"%"); status.setTextColor(theme==2?0xffcccccc:0xff333333);
         String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'>"+
             "<style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:"+bg+";color:"+fg+"}"+
             "body{font-family:Georgia,serif;font-size:"+fontSize+"px;line-height:1.65}"+
@@ -141,7 +172,7 @@ public class MainActivity extends Activity {
             "#hint{position:fixed;bottom:9px;left:0;right:0;text-align:center;font:11px sans-serif;opacity:.35;pointer-events:none}"+
             "</style></head><body><div id='reader'><div id='pages'>"+body+"</div></div><div id='ghost'></div><div id='flash'></div><div id='hint'>INKD</div>"+
             "<script>const pages=document.getElementById('pages'),ghost=document.getElementById('ghost'),flash=document.getElementById('flash');"+
-            "let index=0,total=1,busy=false,x=0,y=0;"+
+            "let index="+page+",total=1,busy=false,x=0,y=0;"+
             "function measure(){let old=index;pages.style.transform='none';pages.scrollLeft=0;"+
             "let w=pages.clientWidth;total=Math.max(1,Math.ceil(pages.scrollWidth/w));index=Math.min(old,total-1);go(false)}"+
             "function go(animate){let w=pages.clientWidth;pages.scrollLeft=index*w;InkBridge.progress(index,total)}"+
@@ -159,4 +190,110 @@ public class MainActivity extends Activity {
             "setTimeout(measure,120);</script></body></html>";
         web.loadDataWithBaseURL("https://inkd.local/",html,"text/html","UTF-8",null);
     }
+
+    private int progressPercent() {
+        if(chapters.isEmpty()) return 0;
+        double charsBefore=0, all=0;
+        for(int i=0;i<chapters.size();i++) {
+            int len=chapters.get(i).replaceAll("<[^>]*>","").length();
+            all+=len;
+            if(i<chapter) charsBefore+=len;
+            else if(i==chapter) charsBefore+=len*(page/(double)Math.max(1,totalPages));
+        }
+        return (int)Math.max(0,Math.min(100,Math.round(100*charsBefore/Math.max(1,all))));
+    }
+    private void savePosition() {
+        if(bookId.isEmpty()||chapters.isEmpty())return;
+        getSharedPreferences(PREFS,0).edit().putInt("chapter_"+bookId,chapter)
+            .putInt("page_"+bookId,page).putInt("percent_"+bookId,progressPercent()).apply();
+    }
+    private JSONArray entries() {
+        try {return new JSONArray(getSharedPreferences(PREFS,0).getString("books","[]"));}
+        catch(Exception e){return new JSONArray();}
+    }
+    private void storeEntries(JSONArray arr){getSharedPreferences(PREFS,0).edit().putString("books",arr.toString()).apply();}
+    private void importBook(Uri uri) throws Exception {
+        // Copy the EPUB into private app storage so it remains available offline.
+        File dir=new File(getFilesDir(),"books"); if(!dir.exists()&&!dir.mkdirs())throw new IOException("Dossier inaccessible");
+        File tmp=File.createTempFile("import_",".epub",dir);
+        try(InputStream input=getContentResolver().openInputStream(uri);OutputStream output=new FileOutputStream(tmp)) {
+            if(input==null)throw new IOException("Fichier inaccessible");
+            byte[] buf=new byte[8192]; int n; long count=0;
+            while((n=input.read(buf))!=-1){count+=n;if(count>50_000_000)throw new IOException("EPUB trop volumineux");output.write(buf,0,n);}
+        }
+        String id=java.util.UUID.randomUUID().toString(); File dest=new File(dir,id+".epub");
+        if(!tmp.renameTo(dest))throw new IOException("Impossible de conserver le livre");
+        String previousId=bookId; bookId=id;
+        try {load(Uri.fromFile(dest));}catch(Exception e){dest.delete();bookId=previousId;throw e;}
+        try {
+            JSONArray arr=entries(); JSONObject item=new JSONObject();
+            item.put("id",id);item.put("title",title);item.put("author",author);
+            item.put("added",System.currentTimeMillis());arr.put(item);storeEntries(arr);
+        }catch(Exception e){throw new IOException("Enregistrement impossible",e);}
+        savePosition();
+    }
+    private void openBook(String id) {
+        File file=new File(new File(getFilesDir(),"books"),id+".epub");
+        if(!file.isFile()){Toast.makeText(this,"Livre introuvable",Toast.LENGTH_LONG).show();return;}
+        bookId=id;
+        try {load(Uri.fromFile(file));}
+        catch(Exception e){Toast.makeText(this,"Erreur EPUB : "+e.getMessage(),Toast.LENGTH_LONG).show();}
+    }
+    private void showLibrary() {
+        savePosition(); inLibrary=true;controlsVisible=false;
+        toolbar.setVisibility(View.GONE);bottom.setVisibility(View.GONE);frame.setVisibility(View.GONE);
+        library.setVisibility(View.VISIBLE);library.removeAllViews();
+        TextView heading=new TextView(this);heading.setText("INKD");heading.setTextSize(34);
+        heading.setTypeface(Typeface.SERIF,Typeface.BOLD);heading.setTextColor(0xff202020);
+        library.addView(heading);
+        ImageView logoView=new ImageView(this);logoView.setImageResource(com.inkd.reader.R.drawable.inkd_logo);
+        logoView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        LinearLayout.LayoutParams logoParams=new LinearLayout.LayoutParams(-1,110);
+        library.addView(logoView,logoParams);
+        TextView subtitle=new TextView(this);subtitle.setText("MA BIBLIOTHÈQUE");subtitle.setTextSize(13);
+        subtitle.setTextColor(0xff777777);library.addView(subtitle);
+        Button add=button("+ Ajouter un EPUB",()->pick());library.addView(add);
+        ScrollView scroll=new ScrollView(this);LinearLayout list=new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);scroll.addView(list);
+        JSONArray books=entries();
+        if(books.length()==0){TextView empty=new TextView(this);
+            empty.setText("Ta bibliothèque est vide.\nAjoute ton premier livre EPUB.");
+            empty.setPadding(10,40,10,30);empty.setTextSize(18);list.addView(empty);}
+        for(int i=books.length()-1;i>=0;i--){JSONObject b=books.optJSONObject(i);if(b==null)continue;
+            String id=b.optString("id"),name=b.optString("title","Sans titre"),by=b.optString("author","");
+            int percent=getSharedPreferences(PREFS,0).getInt("percent_"+id,0);
+            LinearLayout item=new LinearLayout(this);item.setOrientation(LinearLayout.VERTICAL);
+            item.setPadding(18,20,18,20);item.setBackgroundColor(0xffe8e2d6);
+            TextView label=new TextView(this);label.setText(name);label.setTextSize(19);
+            label.setTypeface(Typeface.SERIF,Typeface.BOLD);label.setTextColor(0xff202020);item.addView(label);
+            TextView detail=new TextView(this);detail.setText(by+"  ·  "+percent+" % lu");detail.setTextColor(0xff555555);item.addView(detail);
+            ProgressBar bar=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);
+            bar.setMax(100);bar.setProgress(percent);item.addView(bar);
+            item.setOnClickListener(v->openBook(id));
+            item.setOnLongClickListener(v->{new AlertDialog.Builder(this).setTitle("Retirer ce livre ?")
+                .setMessage(name).setNegativeButton("Annuler",null)
+                .setPositiveButton("Supprimer",(d,w)->removeBook(id)).show();return true;});
+            LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.bottomMargin=12;list.addView(item,lp);
+        }
+        library.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+    }
+    private void removeBook(String id){JSONArray old=entries(),fresh=new JSONArray();
+        for(int i=0;i<old.length();i++){JSONObject o=old.optJSONObject(i);
+            if(o!=null&&!id.equals(o.optString("id")))fresh.put(o);}
+        storeEntries(fresh);new File(new File(getFilesDir(),"books"),id+".epub").delete();
+        getSharedPreferences(PREFS,0).edit().remove("chapter_"+id).remove("page_"+id).remove("percent_"+id).apply();
+        if(id.equals(bookId)){bookId="";chapters.clear();chapterNames.clear();}
+        showLibrary();
+    }
+    private void showContents() {
+        if(chapters.isEmpty())return;
+        String[] labels=new String[chapterNames.size()];
+        for(int i=0;i<labels.length;i++)labels[i]=(i+1)+". "+chapterNames.get(i);
+        new AlertDialog.Builder(this).setTitle("Table des matières")
+            .setSingleChoiceItems(labels,chapter,(dialog,which)->{
+                chapter=which;page=0;savePosition();render();dialog.dismiss();
+            }).setNegativeButton("Fermer",null).show();
+    }
+    @Override public void onBackPressed(){if(!inLibrary)showLibrary();else super.onBackPressed();}
+
 }
